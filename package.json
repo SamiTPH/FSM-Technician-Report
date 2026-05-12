@@ -1,0 +1,19 @@
+{
+  "name": "zoho-fsm-technicians-scheduled-work",
+  "version": "1.0.0",
+  "description": "Local-first daily scheduled-work report for Zoho FSM, exported to Excel in SharePoint.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "oauth": "node src/oauthCallback.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1"
+  }
+}
