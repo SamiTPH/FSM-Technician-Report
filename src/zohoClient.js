@@ -65,6 +65,14 @@ class ZohoClient {
     return normalizeRecords(payload);
   }
 
+  async fetchAttendance() {
+    return this.fetchPaginated("/fsm/v1/Attendance");
+  }
+
+  async fetchServiceResources() {
+    return this.fetchPaginated("/fsm/v1/Service_Resources");
+  }
+
   async fetchWorkOrder(workOrderId) {
     const payload = await this.requestJson(`/fsm/v1/Work_Orders/${encodeURIComponent(workOrderId)}`);
     const records = normalizeRecords(payload);
@@ -164,6 +172,8 @@ function normalizeRecords(payload) {
   if (Array.isArray(payload.users)) return payload.users;
   if (Array.isArray(payload.Service_Appointments)) return payload.Service_Appointments;
   if (Array.isArray(payload.Work_Orders)) return payload.Work_Orders;
+  if (Array.isArray(payload.Attendance)) return payload.Attendance;
+  if (Array.isArray(payload.Service_Resources)) return payload.Service_Resources;
   return [];
 }
 

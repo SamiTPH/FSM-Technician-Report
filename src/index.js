@@ -2,6 +2,7 @@ require("dotenv").config({ quiet: true });
 
 const { MicrosoftGraphExcelClient } = require("./microsoftGraphClient");
 const {
+  buildAttendanceReport,
   buildReport,
   filterAppointmentsForReportDate,
   getWorkOrderIds,
@@ -101,6 +102,23 @@ async function main() {
   });
   console.log(`Report built: ${report.recordCount} rows, ${report.groups.length} service-resource groups.`);
 
+  const attendanceRecords = await runStage("Fetching Zoho Attendance records", () => zoho.fetchAttendance());
+  console.log(`Fetched ${attendanceRecords.length} Zoho Attendance record(s).`);
+
+  const serviceResources = await runStage("Fetching Zoho Service Resources", () => zoho.fetchServiceResources());
+  console.log(`Fetched ${serviceResources.length} Zoho Service Resource record(s).`);
+
+  console.log("Building attendance summary...");
+  const attendanceReport = buildAttendanceReport({
+    attendanceRecords,
+    serviceResources,
+    scheduledReport: report,
+    reportDate,
+    businessTimezone: config.businessTimezone,
+    dailyExpectedSeconds: config.dailyExpectedHours * 60 * 60
+  });
+  console.log(`Attendance summary built: ${attendanceReport.presentCount} present, ${attendanceReport.presentWithScheduledWorkCount} present with work, ${attendanceReport.scheduledWithoutAttendanceCount} scheduled without attendance.`);
+
   const microsoftExcel = new MicrosoftGraphExcelClient({
     tenantId: config.microsoftTenantId,
     clientId: config.microsoftClientId,
@@ -114,6 +132,7 @@ async function main() {
   const result = await microsoftExcel.createReportWorkbook({
     title: workbookTitle,
     report,
+    attendanceReport,
     reportDate
   });
 
@@ -171,7 +190,8 @@ function loadConfig() {
     reportTitlePrefix: process.env.REPORT_TITLE_PREFIX || "Technicians Scheduled Work",
     companyName: process.env.COMPANY_NAME || "TPH Group",
     reportDateOverride: process.env.REPORT_DATE_OVERRIDE || "",
-    allowReportDateOverride: process.env.ALLOW_REPORT_DATE_OVERRIDE === "true"
+    allowReportDateOverride: process.env.ALLOW_REPORT_DATE_OVERRIDE === "true",
+    dailyExpectedHours: Number(process.env.DAILY_EXPECTED_HOURS || 8)
   };
 
   const required = [
@@ -189,6 +209,10 @@ function loadConfig() {
   const missing = required.filter(([, value]) => !value).map(([key]) => key);
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+  }
+
+  if (!Number.isFinite(config.dailyExpectedHours) || config.dailyExpectedHours <= 0) {
+    throw new Error("DAILY_EXPECTED_HOURS must be a positive number.");
   }
 
   return config;

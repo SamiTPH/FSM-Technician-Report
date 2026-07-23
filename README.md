@@ -55,10 +55,11 @@ refresh_token=ZOHO_REFRESH_TOKEN
 Required Zoho scopes:
 
 ```text
-ZohoFSM.modules.ServiceAppointments.READ
-ZohoFSM.modules.WorkOrders.READ
+ZohoFSM.modules.all
 ZohoFSM.users.READ
 ```
+
+`ZohoFSM.modules.all` is used because the workbook now reads Service Appointments, Work Orders, Attendance, and Service Resources.
 
 ## Microsoft Setup
 
@@ -116,6 +117,7 @@ MICROSOFT_DRIVE_ID
 MICROSOFT_FOLDER_PATH=/FSM Scheduled Reports
 REPORT_TITLE_PREFIX=Technicians Scheduled Work
 COMPANY_NAME=TPH Group
+DAILY_EXPECTED_HOURS=8
 REPORT_DATE_OVERRIDE optional, YYYY-MM-DD for local backtesting only
 ALLOW_REPORT_DATE_OVERRIDE=false
 ```
@@ -142,7 +144,19 @@ Technicians Scheduled Work - YYYY-MM-DD.xlsx
 
 If a file with that name already exists, SharePoint is asked to rename the new upload instead of replacing the existing workbook.
 
-The first tab is `Scheduled Work` and includes title rows, grouped technician rows, subtotal rows per Service Resource, and a Grand Total row. If no appointments are found, the workbook is still created with the title/header rows and:
+The first tab is `Scheduled Work` and includes title rows, grouped technician rows, subtotal rows per Service Resource, and a Grand Total row.
+
+The workbook also includes `Attendance Summary` and `Attendance Log` tabs. Attendance uses Zoho FSM Attendance as the source of truth for available/present technicians. Daily utilization is calculated as:
+
+```text
+scheduled duration / DAILY_EXPECTED_HOURS
+```
+
+For `Attendance Summary` and `Attendance Log`, Attendance records are included when their check-in/check-out range touches 12:00 AM through 11:59 PM for the report date in `BUSINESS_TIMEZONE` (Dubai time by default). Scheduled Work report filtering is unchanged.
+
+For attendance-side utilization only, overlapping scheduled appointment time for the same technician is merged before calculating scheduled duration. For example, three duplicate 9-hour appointments in the same time window count as 9 scheduled hours, not 27.
+
+If no appointments are found, the workbook is still created with the title/header rows and:
 
 ```text
 No scheduled appointments found for YYYY-MM-DD.

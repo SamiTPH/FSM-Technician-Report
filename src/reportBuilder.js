@@ -50,6 +50,8 @@ const RESOURCE_FIELD_NAMES = [
   "Resources"
 ];
 
+const DEFAULT_DAILY_EXPECTED_SECONDS = 8 * 60 * 60;
+
 function buildReport({ appointments, users, workOrdersById, businessTimezone, reportDate }) {
   const resourceLookup = buildServiceResourceLookup(users);
   const rows = [];
@@ -128,6 +130,130 @@ function buildReport({ appointments, users, workOrdersById, businessTimezone, re
   };
 }
 
+function buildAttendanceReport({
+  attendanceRecords,
+  serviceResources,
+  scheduledReport,
+  reportDate,
+  businessTimezone,
+  dailyExpectedSeconds = DEFAULT_DAILY_EXPECTED_SECONDS
+}) {
+  const serviceResourceLookup = buildServiceResourceDetailsLookup(serviceResources);
+  const scheduledLookup = buildScheduledResourceLookup(scheduledReport);
+  const attendanceLookup = new Map();
+
+  for (const record of attendanceRecords || []) {
+    if (!attendanceTouchesReportDate(record, reportDate, businessTimezone)) continue;
+
+    const resource = parseAttendanceResource(record);
+    const key = resource.id || nameKey(resource.name);
+    if (!key) continue;
+
+    let row = attendanceLookup.get(key);
+    if (!row) {
+      const serviceResource = serviceResourceLookup.get(resource.id) || serviceResourceLookup.get(nameKey(resource.name)) || {};
+      row = {
+        serviceResourceId: resource.id,
+        serviceResourceName: resource.name || serviceResource.name || "",
+        serviceResourceType: serviceResource.type || "",
+        attendanceStatus: stringifyLookup(record.Status || record.status),
+        attendanceDate: stringifyLookup(record.Date),
+        firstCheckIn: "",
+        firstCheckInDisplay: "",
+        lastCheckOut: "",
+        lastCheckOutDisplay: "",
+        workingDuration: "",
+        actualDuration: "",
+        attendanceRecordCount: 0
+      };
+      attendanceLookup.set(key, row);
+    }
+
+    row.attendanceRecordCount += 1;
+    row.attendanceStatus = row.attendanceStatus || stringifyLookup(record.Status || record.status);
+    row.workingDuration = row.workingDuration || formatAttendanceDuration(record.Working_Duration);
+    row.actualDuration = row.actualDuration || formatAttendanceDuration(record.Actual_Duration);
+
+    const firstCheckIn = stringifyLookup(record.First_Check_In || record.Check_In_Time);
+    if (firstCheckIn && (!row.firstCheckIn || dateValue(firstCheckIn) < dateValue(row.firstCheckIn))) {
+      row.firstCheckIn = firstCheckIn;
+      row.firstCheckInDisplay = formatZohoDateTime(firstCheckIn, businessTimezone);
+    }
+
+    const lastCheckOut = stringifyLookup(record.Last_Check_Out || record.Check_Out_Time);
+    if (lastCheckOut && (!row.lastCheckOut || dateValue(lastCheckOut) > dateValue(row.lastCheckOut))) {
+      row.lastCheckOut = lastCheckOut;
+      row.lastCheckOutDisplay = formatZohoDateTime(lastCheckOut, businessTimezone);
+    }
+  }
+
+  const attendanceRows = [];
+  for (const [key, row] of attendanceLookup.entries()) {
+    const scheduled = scheduledLookup.get(key) || scheduledLookup.get(nameKey(row.serviceResourceName));
+    const scheduledSeconds = scheduled?.totalSeconds || 0;
+    attendanceRows.push({
+      ...row,
+      appointmentCount: scheduled?.appointmentCount || 0,
+      scheduledDurationSeconds: scheduledSeconds,
+      scheduledDurationDisplay: formatDuration(scheduledSeconds),
+      utilizationRatio: ratioValue(scheduledSeconds, dailyExpectedSeconds),
+      utilizationDisplay: formatPercent(ratioValue(scheduledSeconds, dailyExpectedSeconds)),
+      appointments: scheduled?.appointments || []
+    });
+  }
+
+  const presentRows = attendanceRows.filter((row) => normalizeKey(row.attendanceStatus) === "present");
+  const presentLookup = new Set([
+    ...presentRows.map((row) => row.serviceResourceId).filter(Boolean),
+    ...presentRows.map((row) => nameKey(row.serviceResourceName)).filter(Boolean)
+  ]);
+  const scheduledWithoutAttendanceRows = [];
+
+  for (const [key, scheduled] of scheduledLookup.entries()) {
+    if (key.startsWith("name:")) continue;
+    const scheduledNameKey = nameKey(scheduled.serviceResourceName);
+    if (presentLookup.has(scheduled.serviceResourceId) || presentLookup.has(scheduledNameKey)) continue;
+
+    scheduledWithoutAttendanceRows.push({
+      serviceResourceId: scheduled.serviceResourceId,
+      serviceResourceName: scheduled.serviceResourceName,
+      serviceResourceType: serviceResourceLookup.get(scheduled.serviceResourceId)?.type
+        || serviceResourceLookup.get(scheduledNameKey)?.type
+        || "",
+      appointmentCount: scheduled.appointmentCount,
+      scheduledDurationSeconds: scheduled.totalSeconds,
+      scheduledDurationDisplay: formatDuration(scheduled.totalSeconds),
+      utilizationRatio: ratioValue(scheduled.totalSeconds, dailyExpectedSeconds),
+      utilizationDisplay: formatPercent(ratioValue(scheduled.totalSeconds, dailyExpectedSeconds)),
+      appointments: scheduled.appointments
+    });
+  }
+
+  attendanceRows.sort((a, b) => a.serviceResourceName.localeCompare(b.serviceResourceName));
+  scheduledWithoutAttendanceRows.sort((a, b) => a.serviceResourceName.localeCompare(b.serviceResourceName));
+
+  const presentWithScheduledWork = presentRows.filter((row) => row.appointmentCount > 0);
+  const presentWithoutScheduledWork = presentRows.filter((row) => row.appointmentCount === 0);
+  const nonPresentAttendanceRows = attendanceRows.filter((row) => normalizeKey(row.attendanceStatus) !== "present");
+
+  return {
+    reportDate,
+    dailyExpectedSeconds,
+    attendanceRecordCount: attendanceRecords?.length || 0,
+    attendanceRowsForDate: attendanceRows.length,
+    presentCount: presentRows.length,
+    presentWithScheduledWorkCount: presentWithScheduledWork.length,
+    presentWithoutScheduledWorkCount: presentWithoutScheduledWork.length,
+    scheduledWithoutAttendanceCount: scheduledWithoutAttendanceRows.length,
+    nonPresentAttendanceCount: nonPresentAttendanceRows.length,
+    attendanceRows,
+    presentWithScheduledWork,
+    presentWithoutScheduledWork,
+    scheduledWithoutAttendanceRows,
+    nonPresentAttendanceRows
+  };
+}
+
 function filterAppointmentsForReportDate(appointments, reportDate, businessTimezone) {
   return appointments.filter((appointment) => {
     const scheduledStart = getFirst(appointment, DATE_FIELD_CANDIDATES);
@@ -147,6 +273,132 @@ function filterAppointmentsForReportDate(appointments, reportDate, businessTimez
 
     return false;
   });
+}
+
+function buildServiceResourceDetailsLookup(serviceResources) {
+  const lookup = new Map();
+  for (const resource of serviceResources || []) {
+    const id = String(resource.id || resource.ID || "");
+    const name = getName(resource);
+    const details = {
+      id,
+      name,
+      type: stringifyLookup(resource.Type || resource.type)
+    };
+    if (id) lookup.set(id, details);
+    if (name) lookup.set(nameKey(name), details);
+  }
+  return lookup;
+}
+
+function buildScheduledResourceLookup(scheduledReport) {
+  const lookup = new Map();
+  for (const group of scheduledReport?.groups || []) {
+    if (group.serviceResourceName === "Unassigned") continue;
+
+    const serviceResourceId = group.rows.find((row) => row.serviceResourceId)?.serviceResourceId || "";
+    const mergedTotalSeconds = getMergedScheduledSeconds(group.rows);
+    const scheduled = {
+      serviceResourceId,
+      serviceResourceName: group.serviceResourceName,
+      appointmentCount: group.rows.length,
+      totalSeconds: mergedTotalSeconds,
+      rawTotalSeconds: group.totalSeconds,
+      appointments: group.rows.map((row) => ({
+        appointmentId: row.appointmentId,
+        appointmentName: row.appointmentName,
+        scheduledStartDisplay: row.scheduledStartDisplay,
+        scheduledEndDisplay: row.scheduledEndDisplay,
+        scheduledDurationSeconds: row.scheduledDurationSeconds,
+        scheduledDurationDisplay: formatDuration(row.scheduledDurationSeconds),
+        status: row.status,
+        workOrderName: row.workOrderName,
+        workOrderStatus: row.workOrderStatus
+      }))
+    };
+
+    if (serviceResourceId) lookup.set(serviceResourceId, scheduled);
+    lookup.set(nameKey(group.serviceResourceName), scheduled);
+  }
+  return lookup;
+}
+
+function getMergedScheduledSeconds(rows) {
+  const intervals = [];
+  let fallbackSeconds = 0;
+
+  for (const row of rows || []) {
+    const start = new Date(row.scheduledStart).getTime();
+    const end = new Date(row.scheduledEnd).getTime();
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      intervals.push({ start, end });
+    } else {
+      fallbackSeconds += row.scheduledDurationSeconds || 0;
+    }
+  }
+
+  if (intervals.length === 0) return fallbackSeconds;
+
+  intervals.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged = [];
+  for (const interval of intervals) {
+    const previous = merged[merged.length - 1];
+    if (!previous || interval.start > previous.end) {
+      merged.push({ ...interval });
+    } else if (interval.end > previous.end) {
+      previous.end = interval.end;
+    }
+  }
+
+  const mergedSeconds = merged.reduce((sum, interval) => {
+    return sum + Math.round((interval.end - interval.start) / 1000);
+  }, 0);
+
+  return mergedSeconds + fallbackSeconds;
+}
+
+function attendanceTouchesReportDate(record, reportDate, timeZone) {
+  const firstCheckIn = stringifyLookup(record.First_Check_In || record.Check_In_Time);
+  const lastCheckOut = stringifyLookup(record.Last_Check_Out || record.Check_Out_Time);
+
+  if (firstCheckIn || lastCheckOut) {
+    const startKey = localDateKey(firstCheckIn || lastCheckOut, timeZone);
+    const endKey = localDateKey(lastCheckOut || firstCheckIn, timeZone);
+    return Boolean(startKey) && startKey <= reportDate && endKey >= reportDate;
+  }
+
+  const dateValue = stringifyLookup(record.Date);
+  return rawDateKey(dateValue) === reportDate || localDateKey(dateValue, timeZone) === reportDate;
+}
+
+function parseAttendanceResource(record) {
+  const resource = record.Service_Resource || record.Service_Resources || {};
+  return {
+    id: String(resource.id || resource.ID || record.Service_Resource_ID || ""),
+    name: getName(resource) || getName(record)
+  };
+}
+
+function nameKey(value) {
+  const normalized = normalizeKey(value);
+  return normalized ? `name:${normalized}` : "";
+}
+
+function ratioValue(seconds, denominatorSeconds) {
+  if (!denominatorSeconds) return 0;
+  return (seconds || 0) / denominatorSeconds;
+}
+
+function formatPercent(value) {
+  return `${Math.round((value || 0) * 100)}%`;
+}
+
+function formatAttendanceDuration(value) {
+  if (!value) return "";
+  if (typeof value === "object") {
+    return value.hours || (value.unit ? formatDuration(Number(value.unit)) : "");
+  }
+  return stringifyLookup(value);
 }
 
 function buildServiceResourceLookup(users) {
@@ -522,6 +774,7 @@ function pad2(value) {
 }
 
 module.exports = {
+  buildAttendanceReport,
   buildReport,
   filterAppointmentsForReportDate,
   formatDuration,
